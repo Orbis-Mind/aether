@@ -37,7 +37,7 @@ func banner() {
 	fmt.Println(cyan(`
   ╔═══════════════════════════════════════╗
   ║   ⚡  Aether AI Compiler & Runtime   ║
-  ║   Make AI as simple as Docker        ║
+  ║   Compile AI workloads. Run reliably.║
   ╚═══════════════════════════════════════╝`))
 }
 
@@ -628,7 +628,7 @@ func printHelp() {
 	fmt.Print(cyan(`
   ╔═══════════════════════════════════════╗
   ║   ⚡  Aether AI Compiler & Runtime   ║
-  ║   Make AI as simple as Docker        ║
+  ║   Compile AI workloads. Run reliably.║
   ╚═══════════════════════════════════════╝
 `) + `
   Usage: aether <command> [options]

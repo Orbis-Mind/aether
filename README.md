@@ -1,114 +1,247 @@
 <p align="center">
-  <img src="docs/banner.png" alt="Aether — AI Compiler & Runtime. Write once. Aether picks the best model." width="820">
+  <img src="docs/banner.png" alt="Aether — AI Workload Compiler and Execution Runtime" width="820">
 </p>
 
-<h1 align="center">Aether ⚡ — Policy Compiler & Free-First Router for AI</h1>
+<h1 align="center">Aether — AI Workload Compiler and Execution Runtime (Go Edition)</h1>
 
-> You write a **policy**. Aether classifies the task, filters models by your
-> constraints, and routes to the best-fitting model — preferring **local** models
-> so your default path costs **$0** and stays private.
+> Aether compiles an AI **workload definition** into a validated, deterministic
+> **execution plan**, then runs that plan with retries, fallback, caching, and
+> full observability. It picks the right model for the work as part of
+> compilation — but model routing is a *supporting capability*, not the product.
 
-**Single static binary. Zero external Go dependencies. Local-first. Works offline once a model is pulled.**
+**Single static binary · zero third-party Go dependencies · local-first · runs offline after a model is pulled.**
 
-Aether is not another API wrapper. It is a small compiler + runtime that turns
-`agent.ae.yaml` into an execution plan and picks *which model, strategy, and
-fallback path* to use for each workload.
+> **Scope note (read this first).** Today a *workload* is a single model
+> operation together with its policy, memory, and tools; Aether compiles it to a
+> linear execution plan and runs it reliably. The multi-operation compiler and
+> runtime — execution graphs (DAGs), cross-operation scheduling, and recovery —
+> are the **roadmap**, clearly marked throughout and in
+> [`docs/roadmap.md`](docs/roadmap.md). This README never claims a feature the
+> code doesn't have; see [`docs/FEATURE_INVENTORY.md`](docs/FEATURE_INVENTORY.md).
 
-## How it flows
+---
 
-The lifecycle of one request — **define → compile → route → run → observe →
-result**, with measured results feeding back to improve future routing:
+## 1. Problem statement
+
+AI workloads are usually wired together imperatively: pick a model, call an API,
+bolt on retries, hope for the best. That couples the *definition* of the work to
+the *mechanics* of running it — so changing a model, a budget, or a reliability
+policy means rewriting code, and there is no plan to validate, no artifact to
+ship, and no consistent place to observe what happened.
+
+Aether separates the two:
+
+> **How can an AI workload be compiled into an executable plan and executed
+> reliably and efficiently under changing runtime conditions?**
+
+You declare *what* to run and *under what constraints*; Aether compiles that into
+a validated plan and manages its execution.
+
+## 2. What Aether is
+
+- An **AI Workload Compiler**: it validates a workload definition, selects a
+  model under your constraints, optimizes prompts, estimates cost, and emits a
+  deterministic, integrity-verified `.ae` artifact.
+- An **Execution Runtime**: it runs the compiled plan with context-aware
+  execution, retries + fallback, bounded concurrency, caching, memory, and
+  structured observability.
+- **Local-first**: the default path uses local models (via Ollama) at **$0** and
+  stays on your machine. Cloud providers are optional, behind the same interface.
+
+## 3. What Aether is NOT
+
+- Not primarily an **LLM model router** (routing is a supporting capability).
+- Not an **API gateway**.
+- Not an **offline inference engine** (it does not run model weights itself; it
+  delegates to providers like Ollama or any OpenAI-compatible server).
+- Not a **prompt-engineering framework**.
+- Not a **LangChain-style agent framework**.
+- Not a **model-selection utility**.
+
+## 4. Core architecture
+
+Five pillars define the product direction. The table states, honestly, what is
+**implemented today** versus **planned** (full detail in
+[`docs/FEATURE_INVENTORY.md`](docs/FEATURE_INVENTORY.md)).
+
+| Pillar | Today | Planned |
+|---|---|---|
+| **A. Workload Compiler** ([docs](docs/compiler.md)) | ✅ validate → select model → optimize → emit deterministic artifact; linear execution steps | ⬜ dependency analysis, execution graphs (DAGs), parallelism detection, multi-operation workloads |
+| **B. Execution Runtime** ([docs](docs/runtime.md)) | ✅ single-operation execution, state, cancellation, bounded concurrency | ⬜ scheduling independent operations, DAG execution, intermediate-result passing |
+| **C. Reliability & Recovery** ([docs](docs/reliability.md)) | ✅ typed errors, bounded retries + jittered backoff, timeouts/cancellation, fallback | ⬜ checkpointing / recovery across operations |
+| **D. Adaptive Optimization** ([docs](docs/optimization.md)) | 🟡 metrics + measured-quality routing feedback; static prompt/cache optimization | ⬜ comparing alternative plans, schedule/resource optimization |
+| **E. Observability** ([docs](docs/observability.md)) | ✅ traces, latency (P95), retries/failures, stats, structured logs + execution IDs, reproducible benchmarks | 🟡 in-process CPU/RAM sampling |
+
+See [`docs/architecture.md`](docs/architecture.md) for the full component map and
+execution lifecycle.
+
+## 5. How the compiler works
+
+`aether build` turns `agent.ae.yaml` into a `.ae` artifact:
+
+1. **Parse + validate** — strict YAML (tabs, duplicate keys, unknown fields
+   rejected with line numbers) and schema validation; input size limits.
+2. **Classify** — offline heuristic task analysis (type, difficulty, risk, tools).
+3. **Select a model** — the routing pipeline filters by policy
+   (cost/quality/latency/privacy) and scores candidates.
+4. **Optimize** — compress prompts, estimate tokens, choose a cache strategy.
+5. **Emit a plan** — a deterministic `core.ExecutionPlan` with a linear step list,
+   written into a versioned, SHA-256-verified `.ae` artifact (reads legacy v1).
+
+Compilation is **deterministic**: the same spec produces a byte-identical
+artifact (content-addressed plan ID + `SOURCE_DATE_EPOCH` build time).
+
+## 6. How the execution runtime works
+
+`aether run` executes a compiled plan for one request:
+
+1. Render the system/user prompt (injecting retrieved memory when configured).
+2. Consult the bounded cache (safe-to-reuse prompts only).
+3. Call the selected model through the provider abstraction, with retries +
+   fallback (see §7); stream deltas when `--stream`.
+4. Persist memory and cache; record an execution trace.
+
+Execution is **context-aware**: Ctrl-C / SIGTERM cancels in-flight work.
+
+## 7. Reliability and fault recovery
+
+- **Typed errors** — permanent (missing key, model not pulled) vs. transient
+  (timeout, temporary network); permanent errors fail fast to the next fallback.
+- **Bounded retries** — exponential backoff with jitter; never a retry storm.
+- **Timeouts & cancellation** — per-attempt deadlines, caller cancellation
+  propagated into provider calls and backoff.
+- **Fallback chain** — ordered fallback models, bounded by policy.
+- **Structured failure info** on every result.
+
+Planned: checkpoint/recovery across operations (see [`docs/reliability.md`](docs/reliability.md)).
+
+## 8. Adaptive optimization
+
+- **Metrics-driven routing feedback (real):** `aether evaluate` measures models
+  on a dataset and writes measured quality that overlays the registry, so future
+  compilation routes on *your* data, not vendor priors.
+- **Static optimization (real):** prompt compression and cache-strategy selection
+  at compile time.
+- **Planned:** comparing alternative execution plans and optimizing scheduling —
+  adopted only after passing validation. See [`docs/optimization.md`](docs/optimization.md).
+
+## 9. Observability
+
+Execution traces, operation latency (incl. P95), retries and failures, a routing
+dataset (JSONL), and `aether stats`. Structured JSON logs (stderr,
+`AETHER_LOG_LEVEL`, quiet by default) carry a per-request **execution ID**. See
+[`docs/observability.md`](docs/observability.md).
+
+## 10. Architecture diagram
 
 ```mermaid
-flowchart LR
-  A["1 · DEFINE<br/><code>agent.ae.yaml</code><br/>policy · memory · tools"]
-  B["2 · COMPILE<br/>validate · optimize<br/>build execution plan"]
-  C["3 · ROUTE<br/>score models on<br/>quality · cost · latency"]
-  D["4 · RUNTIME<br/>memory · cache<br/>fallback · streaming"]
-  E["5 · OBSERVE<br/>logs · metrics<br/>routing dataset"]
-  F["6 · RESULT<br/>output · tokens<br/>cost · latency · run id"]
-  A --> B --> C --> D --> E --> F
-  F -. "feedback: measured quality improves routing" .-> A
+flowchart TB
+  spec["Workload Definition<br/><small>agent.ae.yaml</small>"] --> compiler
+
+  subgraph C["Aether Compiler (internal/compiler)"]
+    direction LR
+    validate["Validate<br/><small>strict YAML + schema</small>"] --> classify["Classify<br/><small>task · difficulty · risk</small>"]
+    classify --> route["Model Selection<br/><small>policy filter + scoring</small>"]
+    route --> optimize["Optimize<br/><small>prompts · tokens · cache</small>"]
+    optimize --> plan["Execution Plan<br/><small>.ae artifact (v2, SHA-256)</small>"]
+  end
+  compiler --> C
+
+  subgraph R["Execution Runtime (internal/runtime)"]
+    direction LR
+    render["Render"] --> cache["Cache<br/><small>bounded, safe</small>"]
+    cache --> call["Provider call<br/><small>retry · jitter · fallback · stream</small>"]
+    call --> persist["Persist<br/><small>memory · trace</small>"]
+  end
+  plan --> R
+
+  R --> prov["Providers<br/><small>Ollama · OpenAI-compatible · optional cloud · mock</small>"]
+  R --> obs["Observability<br/><small>traces · metrics · logs (exec id)</small>"]
+  obs -. "measured quality overlays the registry" .-> route
+
+  classDef planned fill:#f5f5f5,stroke:#999,color:#555,stroke-dasharray:4 3;
 ```
 
----
+> Planned components (DAG compiler, operation scheduler, recovery engine,
+> adaptive optimizer) are intentionally **not** shown as current architecture.
 
-## Why
+## 11. Installation
 
-Most "LLM gateways" make you hardcode a model. Aether inverts that: you declare
-what you care about (quality, cost, latency, privacy), and the router decides.
-Because the default is **local-first**, a developer with a laptop and **no
-budget** can run the whole thing — no OpenAI/Anthropic/cloud account required.
-
-Optional cloud providers exist behind the same interface, but are **never
-required** and are excluded entirely under a `privacy: local` policy.
-
----
-
-## Production-ready
-
-Aether has been through a full engineering-hardening pass. Highlights:
-
-- **Safe artifacts** — the `.ae` format is bounds-checked and integrity-verified
-  (full SHA-256), with size and zip-bomb limits. A corrupt artifact returns an
-  error, never a panic (fuzz-tested). Compilation is **deterministic**.
-- **Strict specs** — the YAML parser rejects tabs, duplicate keys, and unknown
-  fields with line-numbered errors instead of silently mis-parsing.
-- **Reliable runtime** — context-aware execution (cancel with Ctrl-C), typed
-  retryable-vs-permanent errors, bounded retries with jittered backoff, bounded
-  caches, and concurrency-safe stores (race-clean).
-- **Observability** — structured JSON logs (`AETHER_LOG_LEVEL`, quiet by
-  default) with per-request execution IDs; metrics and a routing dataset.
-- **Supply chain** — CI runs `go vet`, `go test -race`, coverage,
-  [`govulncheck`](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck), and
-  secret scanning; releases are reproducible (`-trimpath`) and ship an SBOM +
-  `SHA256SUMS`.
-
-The complete finding-by-finding log is in
-[`docs/ENGINEERING_AUDIT.md`](docs/ENGINEERING_AUDIT.md).
-
----
-
-## Quick start ($0, no API key)
+Requires **Go 1.26+**. Zero third-party dependencies.
 
 ```bash
-# 1. Install a free local model runtime (once)
-#    https://ollama.com  — then:
-ollama serve
-ollama pull llama3.2            # ~2GB
-
-# 2. Build Aether
+git clone https://github.com/Orbis-Mind/aether-go
+cd aether-go
 go build -o aether ./cmd/aether
+```
 
-# 3. Scaffold, check your environment, and run — fully local
+Optional local inference (recommended, $0): install [Ollama](https://ollama.com),
+then `ollama serve && ollama pull llama3.2`.
+
+## 12. Quick start
+
+```bash
+# Scaffold, check environment, compile, run — fully local
 ./aether init my-agent && cd my-agent
-../aether doctor               # checks Go, Ollama, models, permissions (with fixes)
-../aether build
+../aether doctor                 # checks Go, Ollama, models, permissions
+../aether build                  # compile agent.ae.yaml -> .ae artifact
 ../aether run --local --message "Explain caching in one paragraph"
 ```
 
-No Ollama yet? Everything still works with the mock model:
+No model installed? Everything still works against the mock provider:
 
 ```bash
 aether run --mock --message "Hello"
 ```
 
----
+Inspect the compiled plan:
 
-## The policy (what you actually write)
+```bash
+aether inspect my-agent-1.0.0.ae
+```
+
+## 13. CLI reference
+
+| Command | Description |
+|---|---|
+| `aether init [name]` | Scaffold a new workload definition |
+| `aether build [spec] [-output dir]` | Compile `.ae.yaml` → `.ae` artifact |
+| `aether run [artifact] --message M [--local\|--mock\|--strategy S\|--stream\|--json]` | Execute a compiled plan |
+| `aether test [spec]` | Validate a spec and show the model-selection decision |
+| `aether inspect [artifact]` | Show a compiled plan and its routing |
+| `aether models` | Local + catalogue models with quality provenance |
+| `aether doctor` | Environment checks (Go, Ollama, models, permissions) |
+| `aether evaluate [dataset] [--models k1,k2] [--save]` | Offline, deterministic model benchmark |
+| `aether benchmark --runs N` | Runtime cost/latency/quality benchmark |
+| `aether stats` | Observability report |
+| `aether publish \| pull \| search` | Local artifact registry |
+| `aether --version` | Version |
+
+## 14. Configuration reference
+
+A workload is defined in `agent.ae.yaml`:
 
 ```yaml
-# agent.ae.yaml
 name: my-agent
 version: "1.0.0"
+description: "What this workload does"
 
 policy:
   quality:   { minimum: 0.80 }     # absolute quality floor (0..1)
   cost:      { max_per_run: 0.01 } # USD budget per run
   latency:   { max_p95: 2000 }     # ms
-  privacy:   { level: local }      # HARD guarantee: never calls cloud
+  privacy:   { level: local }      # hard constraint: never calls cloud
   execution: { local_first: true } # prefer an installed local model
   fallback:  { enabled: true, max_attempts: 2 }
+
+memory:
+  semantic: true
+  long_term: false
+  ttl_seconds: 86400
+
+tools:
+  - name: search
+    description: Search a knowledge base
 
 prompts:
   system: You are a helpful assistant.
@@ -116,226 +249,81 @@ prompts:
 ```
 
 The original flat form (`quality: balanced`, `max_cost_per_run: 0.05`,
-`latency: fast`, `prefer_local: true`) still works — both are supported.
+`latency: fast`, `prefer_local: true`) is also accepted. Unknown keys are
+rejected at compile time.
 
----
+Environment: `AETHER_LOG_LEVEL` (debug|info|warn|error), `AETHER_LOG_FORMAT`
+(json|text), `OLLAMA_HOST`, `OPENAI_API_KEY` / `OPENAI_BASE_URL`,
+`ANTHROPIC_API_KEY` — all optional.
 
-## Routing strategies
+## 15. Performance benchmarks (verified, reproducible)
 
-```bash
-aether run --strategy auto       # balanced quality/cost/latency (default)
-aether run --strategy cheapest   # lowest cost that meets policy
-aether run --strategy fastest    # lowest latency that meets policy
-aether run --strategy best       # highest quality that meets policy
-aether run --strategy local      # local-only ($0, private)
-aether run --local               # same as --strategy local
-aether run --stream              # stream tokens as they generate
-```
+These are **measured** on local models via Ollama on an Apple-Silicon machine.
+They describe *these models on these datasets on this hardware* — your numbers
+will vary. Nothing here is hand-written; reproduce with `aether evaluate`.
 
-The pipeline is fully transparent — `aether test` shows every candidate and why
-it was kept or rejected:
+**Aether built-in dataset** (`aether-basic-v1`, 44 tasks, keyword/regex grading):
 
-```
-Intelligent Routing Analysis
-==============================================================================
-Task: coding         Difficulty: 0.65  Risk: moderate Reasoning:false Tools:false
-Strategy: auto       Min-quality: 0.82  Budget: $0.010000  Max-latency: 3000ms
-------------------------------------------------------------------------------
-Model               Quality   Prov     Cost $   Latency  Status
-------------------------------------------------------------------------------
-qwen2.5                0.81    est    0.00000    2200ms  ✗ quality 0.81 < required 0.82
-gpt-4o-mini            0.70    est    0.00024     700ms  ✗ quality 0.70 < required 0.82
-claude-sonnet-3-5      0.88    est    0.00608    2000ms  ★ SELECTED
-```
+| Model | Measured quality | Success |
+|---|---|---|
+| phi3 | 91.7% | 100% |
+| gemma2:2b | 83.0% | 100% |
 
-`Prov` is the quality **provenance**: `meas` (measured by `aether evaluate` on
-your machine), `est` (estimated prior), or `unk` (unknown). Aether never
-presents an estimate as a measurement.
+**GSM8K** (external math benchmark, 200 questions, exact-match grading):
 
----
+| Model | Accuracy | 95% CI | RAM |
+|---|---|---|---|
+| phi3 (3.8B) | 83.0% | ±5.2% | 3.85 GB |
+| qwen2.5:3b | 82.0% | ±5.3% | 2.16 GB |
+| llama3:8b | 79.0% | ±5.6% | 5.02 GB |
+| gemma2:2b | 59.0% | ±6.8% | 1.93 GB |
 
-## Free, offline evaluation
+Note the larger 8B model is *not* the most accurate here — the point of measured
+routing is to pick the smallest model that is actually good enough.
 
-Aether ships an original benchmark dataset and a heuristic scorer that runs with
-**no paid API**. It measures your locally-available models and feeds the results
-back into routing.
+## 16. Roadmap
+
+See [`docs/roadmap.md`](docs/roadmap.md). Near-term direction: an intermediate
+representation and **execution graph (DAG)** compiler, an **operation scheduler**
+for independent operations, a **recovery engine** (checkpoint/resume), and an
+**adaptive optimizer** that compares validated plans. These are goals, not
+current features.
+
+## 17. Development and testing
 
 ```bash
-aether evaluate                       # uses installed local models + built-in dataset
-aether evaluate my-dataset.json       # bring your own prompts
-```
-
-Example — an **actual run** on an Apple Silicon Mac (your numbers will vary by
-hardware and which models you pulled; nothing here is hand-written):
-
-```
-AETHER MODEL EVALUATION
-================================================================
-Dataset: aether-basic-v1
-Tasks:   44
-
-Model            Quality        P95    Success   Tokens
-----------------------------------------------------------------
-phi3             91.7%       5039ms      100%  5166/meas
-gemma2           83.0%       3745ms      100%  4185/meas
-----------------------------------------------------------------
-Recommendation:
-  phi3
-
-Reason:
-  Best MEASURED quality on this dataset. Not a claim about any
-  other workload — measure your own prompts to route on your data.
-```
-
-Note that `gemma2`'s *estimated* prior (0.71) and `phi3`'s (0.66) both ranked
-below their *measured* scores here — which is the whole point of measuring
-instead of trusting vendor priors. A model installed under a non-default tag
-(e.g. `qwen2.5:3b` when the catalogue key is `qwen2.5`) is reported as failed,
-not silently scored — honest by construction.
-
-Measured scores are written to `.aether/observability/benchmarks.json` and
-overlay the registry, so future `aether run`/`aether test` route on **your**
-data, not vendor claims.
-
-> **Honesty note:** the built-in scorer is a deterministic keyword/regex
-> heuristic — a proxy for quality, clearly labelled as such. It is not a human
-> judgment or an LLM-as-judge. Items with no deterministic expectation are
-> reported as *unscorable*, never fabricated.
-
----
-
-## Reproducible benchmark: Aether routing vs. "always strongest"
-
-The point of routing is to do at least as well as always picking the strongest
-model, while spending less (cost/latency/compute). To reproduce on your machine:
-
-```bash
-ollama pull llama3.2 && ollama pull qwen2.5     # two local models
-aether evaluate                                  # measures both on aether-basic-v1
-# Compare: routing per-task (aether test on varied prompts) vs. forcing the
-# strongest model on every task (--strategy best). Routing should match quality
-# on easy tasks while using the smaller/faster model, lowering p95 and compute.
-```
-
-Because results depend on which models you pulled and your hardware, this repo
-does **not** ship fabricated numbers. Run the command above to generate a report
-you can trust. See `evaluation/datasets/aether-basic-v1.json` (44 original,
-CC0 prompts across 10 categories) — add your own.
-
----
-
-## Architecture
-
-Everything below the router is provider-agnostic — local and cloud backends are
-peers behind one `ModelProvider` interface. The default path never leaves your
-machine.
-
-```mermaid
-flowchart TB
-  spec["agent.ae.yaml"] --> compiler["Compiler<br/><small>validate · optimize prompts · estimate tokens</small>"]
-  compiler --> classifier["Classifier<br/><small>task · difficulty · risk · tools</small>"]
-  classifier --> policy["Policy Engine<br/><small>cost · quality · latency · privacy</small>"]
-  policy --> router["Intelligent Router<br/><small>strategy-based selection</small>"]
-
-  router --> ollama["Ollama<br/><small>local · $0</small>"]
-  router --> compat["OpenAI-compatible<br/><small>vLLM / local server</small>"]
-  router --> cloud["Optional cloud<br/><small>OpenAI · Anthropic</small>"]
-
-  subgraph RT["Runtime"]
-    direction LR
-    cache["Cache<br/><small>safety-guarded</small>"] --> memory["Memory<br/><small>local vectors</small>"] --> exec["Provider call<br/><small>retry · jitter · fallback · streaming</small>"]
-  end
-  ollama --> cache
-  compat --> cache
-  cloud --> cache
-  exec --> out["Response + Observability + Routing dataset"]
-  out -. "measured quality overlays the registry" .-> router
-
-  classDef local fill:#e8f5e9,stroke:#43a047,color:#1b5e20;
-  classDef opt fill:#f3e5f5,stroke:#8e24aa,color:#4a148c;
-  class ollama,compat local;
-  class cloud opt;
-```
-
-**The routing pipeline** (what "3 · ROUTE" expands to):
-
-```mermaid
-flowchart LR
-  req["Request"] --> ta["Task Analysis<br/><small>type · difficulty · risk</small>"]
-  ta --> pf["Policy Filter<br/><small>cost · quality · latency · privacy</small>"]
-  pf --> cand["Candidate Models"]
-  cand --> cap["Capability Match<br/><small>tools · context window</small>"]
-  cap --> score["Score<br/><small>quality · cost · latency</small>"]
-  score --> avail["Availability<br/><small>installed local only</small>"]
-  avail --> sel["Final Selection<br/><small>per strategy</small>"]
-```
-
-**Fallback & resilience** (never a retry storm):
-
-```mermaid
-flowchart LR
-  P["Primary model"] -->|ok| R["Response"]
-  P -->|"transient error"| RT["Retry: backoff + jitter"] --> P
-  P -->|"permanent error (no key / not pulled)"| F1["Fallback model"]
-  F1 -->|ok| R
-  F1 -->|fails| F2["Next fallback (bounded by max_attempts)"]
-  F2 -->|"all fail"| E["Explicit error (never swallowed)"]
-```
-
-- **Provider abstraction** (`internal/provider`): every backend implements one
-  small `ModelProvider` interface (`Generate`, `Stream`, `Capabilities`). Local
-  and cloud are peers; the runtime has zero provider-specific code.
-- **Model registry** (`internal/models`): capabilities, pricing, and quality
-  with explicit `measured/estimated/unknown` provenance.
-- **Classifier** (`internal/classifier`): offline heuristic task analysis
-  (type, difficulty, risk, reasoning/tools) behind a swappable interface.
-- **Policy engine** (`internal/policy`): enforces cost/quality/latency/privacy
-  *before* selection; `privacy: local` is a hard cloud-exclusion guarantee.
-- **Router pipeline** (`internal/router`): task → policy filter → capability /
-  quality / cost / latency scoring → selection, with strategies.
-- **Runtime** (`internal/runtime`): cache (with time-sensitive/personal/secret
-  safeguards) → memory → provider call with retry+jitter+fallback → streaming.
-
----
-
-## CLI reference
-
-| Command | Description |
-|---------|-------------|
-| `aether init [name]` | Scaffold a new project |
-| `aether build` | Compile spec → `.ae` artifact |
-| `aether run` | Execute (free-first: prefers installed local model) |
-| `aether run --local / --strategy S / --stream` | Force local / pick strategy / stream |
-| `aether models` | Local (Ollama) + catalogue models with quality provenance |
-| `aether doctor` | Check Go, Ollama, models, permissions — with fixes |
-| `aether evaluate [dataset]` | Offline model benchmark (measures real quality) |
-| `aether inspect [artifact]` | Show a compiled `.ae` plan and routing |
-| `aether test` | Validate spec + show the routing decision |
-| `aether benchmark --runs N` | Runtime cost/latency/quality benchmark |
-| `aether stats` | Observability report |
-| `aether publish/pull/search` | Local artifact registry |
-
----
-
-## Build from source
-
-Requires Go 1.26+. Zero external dependencies.
-
-```bash
-go build -o aether ./cmd/aether
-go test -race ./...         # 109 tests (incl. fuzz), all offline, race-clean
-gofmt -l internal cmd tests # formatting check (CI-enforced)
+go build ./...
+go test -race ./...        # offline, deterministic
+gofmt -l internal cmd tests
 go vet ./...
 ```
 
----
+CI additionally runs coverage, `govulncheck`, secret scanning, and cross-platform
+builds; releases are reproducible (`-trimpath`) and ship an SBOM + `SHA256SUMS`.
 
-## What Aether does NOT require
+## 18. Contributing
 
-No OpenAI/Anthropic/Gemini credits · no AWS/GCP/Azure · no paid database ·
-no Pinecone/Weaviate · no Datadog/Grafana Cloud · no credit card. Cloud
-integrations are optional adapters, off by default.
+Issues and PRs welcome. Please keep the honesty bar: no fabricated capabilities,
+distinguish implemented from planned, and add tests for new behavior. Match the
+existing zero-dependency, local-first constraints.
 
-## License
+## 19. Positioning vs. related projects
 
-MIT © Orbis-Mind. Benchmark dataset: CC0 (original content).
+Architectural references (categories, not products to copy):
+
+| Project | Category | Aether's difference |
+|---|---|---|
+| Temporal | Durable workflow engine | Aether is AI-workload-specific: compile + model selection + eval feedback |
+| LangGraph | Agent/graph orchestration | Aether compiles a validated plan + artifact; not an agent framework |
+| DSPy | Prompt program compiler/optimizer | Aether compiles execution + reliability, not prompt programs |
+| Together Compiler | Hosted inference/compilation | Aether is local-first and self-hosted |
+| vLLM / SGLang | Inference engines | Aether delegates inference to engines; it does not run weights |
+| Arize Phoenix | LLM observability | Aether includes execution observability as one pillar |
+
+Aether does not claim to be first or best in this category, and makes no
+superiority claims without reproducible benchmarks.
+
+## 20. License
+
+MIT © Orbis-Mind. Benchmark dataset `aether-basic-v1`: CC0 (original content).
+GSM8K: MIT (OpenAI grade-school-math).
