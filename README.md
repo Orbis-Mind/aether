@@ -150,8 +150,8 @@ flowchart TB
   subgraph R["Execution Runtime (internal/runtime)"]
     direction LR
     render["Render"] --> cache["Cache<br/><small>bounded, safe</small>"]
-    cache --> call["Provider call<br/><small>retry · jitter · fallback · stream</small>"]
-    call --> persist["Persist<br/><small>memory · trace</small>"]
+    cache --> modelcall["Provider call<br/><small>retry · jitter · fallback · stream</small>"]
+    modelcall --> persist["Persist<br/><small>memory · trace</small>"]
   end
   plan --> R
 

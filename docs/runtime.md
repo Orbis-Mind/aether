@@ -36,8 +36,8 @@ flowchart LR
   plan["Execution Plan"] --> render["render prompt"]
   render --> cache{"cacheable<br/>& hit?"}
   cache -- yes --> result["Execution Result + trace"]
-  cache -- no --> call["provider call<br/><small>retry · fallback · stream</small>"]
-  call --> persist["persist memory + cache"]
+  cache -- no --> modelcall["provider call<br/><small>retry · fallback · stream</small>"]
+  modelcall --> persist["persist memory + cache"]
   persist --> result
 ```
 
